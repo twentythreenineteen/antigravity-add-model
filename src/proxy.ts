@@ -113,6 +113,7 @@ import { runCustomModelRequest, getProxyMetrics, stopCustomRequests } from './pr
 import { readModelConfig, writeJsonAtomic } from './modelStore';
 import { getRequiredProxyPort, listenProxy } from './proxy/listen';
 import { subagentRouting, SubagentRoutingError } from './proxy/subagentRouting';
+import type { SubagentModelResolver, SubagentRoutingContext } from './proxy/subagentRouting';
 import { resolveConfiguredSubagentModel } from './proxy/subagentModels';
 
 // Dynamic imports (stays require for Electron-specific modules)
@@ -438,8 +439,39 @@ function forwardingHeaders(source: http.IncomingHttpHeaders): http.OutgoingHttpH
   return headers;
 }
 
-function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqBody: Buffer): void {
-  const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
+/**
+ * Rewrites one SSE `data:` payload from Google so a stock-model parent can
+ * still hand a custom model to invoke_subagent. Non-data lines pass through;
+ * malformed JSON is left untouched rather than corrupting the stream.
+ */
+function rewriteGoogleSseLine(
+  line: string,
+  subagent: { context: SubagentRoutingContext; resolve: SubagentModelResolver },
+): string {
+  if (!line.startsWith('data:')) return line;
+  const rest = line.slice('data:'.length);
+  const indent = rest.match(/^[ \t]*/)?.[0] || '';
+  const payload = rest.slice(indent.length);
+  if (!payload || payload === '[DONE]') return line;
+  try {
+    const chunk = JSON.parse(payload);
+    if (chunk && Array.isArray(chunk.candidates)) {
+      chunk.candidates = chunk.candidates.map((candidate: unknown) =>
+        subagentRouting.rewriteCandidate(candidate, subagent.context, subagent.resolve),
+      );
+    }
+    return `data:${indent}${JSON.stringify(chunk)}\n`;
+  } catch {
+    return line;
+  }
+}
+
+function proxyToGoogle(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  reqBody: Buffer,
+  subagent?: { context: SubagentRoutingContext; resolve: SubagentModelResolver },
+): void {  const isCloudCodeUrl = req.url!.includes('v1internal') || req.url!.includes('daily-cloudcode');
   const targetUrl = isCloudCodeUrl
     ? cloudCodeRouting?.resolve(req.headers) || 'https://daily-cloudcode-pa.googleapis.com'
     : 'https://generativelanguage.googleapis.com';
@@ -453,8 +485,10 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
 
   const isGeneration = req.url!.includes('generateContent') || req.url!.includes('streamGenerateContent');
   const shouldBufferAndModify = isCloudCodeUrl && !isGeneration;
+  const rewritesSubagents = isGeneration && Boolean(subagent);
 
-  if (shouldBufferAndModify) {
+  // The subagent rewrite parses the streamed body, so it must be uncompressed.
+  if (shouldBufferAndModify || rewritesSubagents) {
     delete headers['accept-encoding'];
   }
 
@@ -519,6 +553,44 @@ function proxyToGoogle(req: http.IncomingMessage, res: http.ServerResponse, reqB
 
         res.writeHead(proxyRes.statusCode || 200, modifiedHeaders as Record<string, string>);
         res.end(modifiedBuffer);
+      });
+    } else if (rewritesSubagents) {
+      const outHeaders = forwardingHeaders(proxyRes.headers);
+      delete outHeaders['content-length'];
+      res.writeHead(proxyRes.statusCode || 200, outHeaders as Record<string, string>);
+      const isStream = req.url!.includes('streamGenerateContent') || req.url!.includes('alt=sse');
+      if (!isStream) {
+        const chunks: Buffer[] = [];
+        proxyRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+        proxyRes.on('end', () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            res.end(JSON.stringify(subagentRouting.rewriteResponse(body, subagent.context, subagent.resolve)));
+          } catch (e) {
+            log.error('[Proxy] Failed to rewrite native subagent response:', e);
+            res.end(Buffer.concat(chunks).toString('utf8'));
+          }
+        });
+        return;
+      }
+      proxyRes.setEncoding('utf8');
+      let buffer = '';
+      proxyRes.on('data', (chunk: string) => {
+        buffer += chunk;
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, nl + 1);
+          buffer = buffer.slice(nl + 1);
+          res.write(rewriteGoogleSseLine(line, subagent));
+        }
+      });
+      proxyRes.on('end', () => {
+        if (buffer) res.write(rewriteGoogleSseLine(buffer, subagent));
+        res.end();
+      });
+      proxyRes.on('error', (err) => {
+        log.error('[Proxy] Google stream error:', err);
+        if (!res.writableEnded) res.end();
       });
     } else {
       res.writeHead(proxyRes.statusCode || 200, forwardingHeaders(proxyRes.headers));
@@ -1200,7 +1272,10 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
             contents: prepared.body.contents,
           };
           const forwarded = reqJson.request ? { ...reqJson, request: nativeBody } : { ...reqJson, ...nativeBody };
-          proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)));
+          proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)), {
+            context: prepared.context,
+            resolve: (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+          });
           return;
         }
       } catch (err) {
@@ -1257,7 +1332,10 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
           });
           return;
         }
-        proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })));
+        proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })), {
+          context: prepared.context,
+          resolve: (selector) => resolveConfiguredSubagentModel(customModels, selector)?.name,
+        });
         return;
       } catch (e) {
         log.error('[Proxy] JSON parse error in request body:', e);

@@ -7,6 +7,7 @@ Release history preserved from the project README. Historical entries describe t
 - Support enabled configured models in `invoke_subagent` alongside Antigravity's native model tiers. Resolve saved model names without ambiguous aliases or silent fallback from unknown/disabled selections; see [configuration](docs/configuration.md#subagent-model-selection).
 - Isolate each spawn with a temporary route established from the child's prompt before the parent tool result arrives. Avoid collisions between parallel ID-less Google calls and restore original tool arguments before provider translation, including Google-to-OpenAI/Anthropic history replay.
 - Keep routing state bounded and process-local, with explicit expired-route errors. Add local HTTP regressions for JSON/streaming responses, provider switches, concurrent children, and nested inheritance.
+- Rewrite `invoke_subagent` model selection from stock built-in parents too. Their `generateContent` responses travel untranslated through the transparent Google forwarder, so streamed SSE `data:` payloads and buffered JSON responses are now routed through the same subagent bridge, letting a built-in parent spawn a subagent on an enabled custom model.
 
 ### Unreleased — Settings-surface injection for the Custom Models panel
 

@@ -687,4 +687,63 @@ describe('subagent bridge through native-shaped HTTP requests', () => {
     expect(response.status).toBe(400);
     expect(upstream.requests).toHaveLength(0);
   });
+
+  it.each([false, true])(
+    'rewrites a stock-model parent invoke_subagent so a custom child spawns, stream=%s',
+    async (stream) => {
+      const googleRequests: Record<string, unknown>[] = [];
+      const builtin = await serve(async (req, res) => {
+        googleRequests.push(await readBody(req));
+        const candidate = {
+          content: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'invoke_subagent',
+                  args: {
+                    Subagents: [
+                      { Model: 'models/child', Prompt: 'Execute CHILD TASK', TypeName: 'research' },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+          finishReason: 'STOP',
+        };
+        if (stream) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          sse(res, { candidates: [candidate] });
+          res.end();
+        } else {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ candidates: [candidate] }));
+        }
+      });
+      const upstream = await providerFixture(() => undefined);
+      const child = model(upstream.url, 'openai', 'child');
+      const proxy = await fixture([child], builtin);
+
+      const [call] = await toolCalls(
+        await request(proxy, 'gemini-native-pro', 'Start parent', stream, 'parent-cascade'),
+        stream,
+      );
+      expect(call.name).toBe('invoke_subagent');
+      const [invocation] = call.args.Subagents;
+      expect(invocation).toMatchObject({ Model: 'inherit', TypeName: 'research' });
+      expect(invocation.Prompt).toContain('Execute CHILD TASK');
+      expect(invocation.Prompt).toContain('antigravity-subagent-route:');
+      expect(googleRequests).toHaveLength(1);
+
+      // The stock child inherits the native parent's model but carries the marker;
+      // the first child request is rerouted to the configured custom model.
+      const childResponse = await request(proxy, 'gemini-native-pro', invocation.Prompt, stream, 'child-cascade');
+      expect(childResponse.status).toBe(200);
+      expect(await childResponse.text()).toContain('CHILD OK');
+      expect(upstream.requests.map((input) => [input.provider, input.model])).toEqual([
+        ['openai', 'child'],
+      ]);
+    },
+  );
 });

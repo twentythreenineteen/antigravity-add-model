@@ -664,14 +664,16 @@ describe('subagent bridge through native-shaped HTTP requests', () => {
       expect(nativeBody.contents[1].parts[0].functionCall?.args).toEqual({
         Subagents: [{ Model: child.name, Prompt: 'Preserve the original task' }],
       });
-      expect(nativeBody.tools).toEqual([schema]);
+      // Native parents receive the relaxed schema so they may select a configured
+      // custom model for subagents; the tier enum is dropped, not preserved.
+      expect(JSON.stringify(nativeBody.tools)).not.toContain('"enum":["inherit","flash","pro"]');
+      expect(JSON.stringify(nativeBody.tools)).toContain('exact saved name');
       if (transport === 'cloud-code') {
         expect(forwarded.conversationId).toBe('parent');
         expect(forwarded.sessionId).toBe('outer-session');
         expect(nativeBody).not.toHaveProperty('conversationId');
         expect(nativeBody).not.toHaveProperty('sessionId');
       }
-      expect(JSON.stringify(nativeBody.tools)).toContain('"enum":["inherit","flash","pro"]');
     },
   );
 
@@ -714,11 +716,11 @@ describe('subagent bridge through native-shaped HTTP requests', () => {
         };
         if (stream) {
           res.setHeader('Content-Type', 'text/event-stream');
-          sse(res, { candidates: [candidate] });
+          sse(res, { response: { candidates: [candidate] }, traceId: 'tr', metadata: {} });
           res.end();
         } else {
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ candidates: [candidate] }));
+          res.end(JSON.stringify({ response: { candidates: [candidate] }, traceId: 'tr', metadata: {} }));
         }
       });
       const upstream = await providerFixture(() => undefined);

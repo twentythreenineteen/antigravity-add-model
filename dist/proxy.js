@@ -356,23 +356,25 @@ function forwardingHeaders(source) {
 }
 /**
  * Rewrites one SSE `data:` payload from Google so a stock-model parent can
- * still hand a custom model to invoke_subagent. Non-data lines pass through;
- * malformed JSON is left untouched rather than corrupting the stream.
+ * still hand a custom model to invoke_subagent. Every line without an
+ * invoke_subagent is passed through byte-for-byte (preserving `\r\n` framing);
+ * only the rare tool-call payload is parsed and re-serialized. Cloud Code wraps
+ * candidates under `response`, which is unwrapped before rewriting.
  */
 function rewriteGoogleSseLine(line, subagent) {
-    if (!line.startsWith('data:'))
+    if (!line.startsWith('data:') || !line.includes('invoke_subagent'))
         return line;
-    const rest = line.slice('data:'.length);
-    const indent = rest.match(/^[ \t]*/)?.[0] || '';
-    const payload = rest.slice(indent.length);
-    if (!payload || payload === '[DONE]')
-        return line;
+    const eol = line.endsWith('\r\n') ? '\r\n' : line.endsWith('\n') ? '\n' : '';
+    const body = line.slice('data:'.length, eol ? -eol.length : undefined);
+    const indent = body.match(/^[ \t]*/)?.[0] || '';
+    const payload = body.slice(indent.length);
     try {
         const chunk = JSON.parse(payload);
-        if (chunk && Array.isArray(chunk.candidates)) {
-            chunk.candidates = chunk.candidates.map((candidate) => subagentRouting_1.subagentRouting.rewriteCandidate(candidate, subagent.context, subagent.resolve));
+        const record = chunk?.response && typeof chunk.response === 'object' ? chunk.response : chunk;
+        if (record && Array.isArray(record.candidates)) {
+            record.candidates = record.candidates.map((candidate) => subagentRouting_1.subagentRouting.rewriteCandidate(candidate, subagent.context, subagent.resolve));
         }
-        return `data:${indent}${JSON.stringify(chunk)}\n`;
+        return `data:${indent}${JSON.stringify(chunk)}${eol}`;
     }
     catch {
         return line;
@@ -463,7 +465,15 @@ function proxyToGoogle(req, res, reqBody, subagent) {
                 proxyRes.on('end', () => {
                     try {
                         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                        res.end(JSON.stringify(subagentRouting_1.subagentRouting.rewriteResponse(body, subagent.context, subagent.resolve)));
+                        const record = body?.response && typeof body.response === 'object' ? body.response : body;
+                        const rewritten = subagentRouting_1.subagentRouting.rewriteResponse(record, subagent.context, subagent.resolve);
+                        if (body?.response && typeof body.response === 'object') {
+                            body.response = rewritten;
+                            res.end(JSON.stringify(body));
+                        }
+                        else {
+                            res.end(JSON.stringify(rewritten));
+                        }
                     }
                     catch (e) {
                         electron_log_1.default.error('[Proxy] Failed to rewrite native subagent response:', e);
@@ -1093,10 +1103,12 @@ function handleRequest(req, res) {
                         });
                         return;
                     }
-                    // Restore a switched parent's history, keeping the native tool schema.
+                    // Restore a switched parent's history, but keep the relaxed tool schema:
+                    // native parents only attempt a custom Model if the enum is gone.
                     const nativeBody = {
                         ...(reqJson.request || reqJson),
                         contents: prepared.body.contents,
+                        tools: prepared.body.tools,
                     };
                     const forwarded = reqJson.request ? { ...reqJson, request: nativeBody } : { ...reqJson, ...nativeBody };
                     proxyToGoogle(req, res, Buffer.from(JSON.stringify(forwarded)), {
@@ -1146,7 +1158,7 @@ function handleRequest(req, res) {
                     });
                     return;
                 }
-                proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents })), {
+                proxyToGoogle(req, res, Buffer.from(JSON.stringify({ ...geminiBody, contents: prepared.body.contents, tools: prepared.body.tools })), {
                     context: prepared.context,
                     resolve: (selector) => (0, subagentModels_1.resolveConfiguredSubagentModel)(customModels, selector)?.name,
                 });

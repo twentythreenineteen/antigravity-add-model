@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Settings-surface injection for the Custom Models panel
+
+- Mount the Custom Models panel only on real settings surfaces: the desktop Settings dialog (or `/settings` route) and the owned model-manager page, which now declares `data-testid="settings-view"`. Chat text such as an article or heading mentioning "MCP" or "Models & Usage" no longer attracts the panel.
+- Require the mount to be visible settings content: headings inside hidden dialogs, `display: none` subtrees, navigation, articles and code blocks are ignored, and `findRefreshButton` only clicks the settings surface's own refresh button.
+- Re-inject instead of leaking: a panel left in a stale parent (or moved into the conversation) is removed and remounted when the Settings dialog reappears; the mutation observer also watches `characterData` and visibility attributes so hiding/showing the dialog reliably adds or removes the panel.
+
 ### Unreleased — IDE adapter and direct-proxy diagnostics
 
 - Add an Antigravity IDE settings adapter with recognized-layout preflight, comment-preserving edits, hash-checked backups, conflict-safe restore and managed launch. Recognize the official IDE 2.5.5 hidden core endpoint implementation and report its IDE version separately from VS Code 1.107.0. No vendor code or OS startup tasks are changed.

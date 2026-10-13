@@ -39,16 +39,20 @@ const presets = [
 ];
 const openWindows: JSDOM[] = [];
 afterEach(() => {
-  for (const dom of openWindows.splice(0)) dom.window.close();
+  for (const dom of openWindows.splice(0)) {
+    dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+    dom.window.close();
+  }
 });
 const settle = () => new Promise<void>((done) => setImmediate(done));
 
 async function fixture(
   html = '<section id="settings"><h2>Models &amp; Usage</h2></section>',
   initialModels: Record<string, unknown>[] = [model],
+  url = 'http://127.0.0.1:54321/settings',
 ) {
   const dom = new JSDOM(`<!doctype html><html><head></head><body>${html}</body></html>`, {
-    url: 'http://127.0.0.1:54321/settings',
+    url,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
   });
@@ -713,5 +717,63 @@ describe('custom model settings in the preserved vendor preload', () => {
     await f.click('Close');
     expect(f.invoke).toHaveBeenCalledWith('storage:google-login-cancel');
     expect(f.document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each(['MCP', 'MCP Servers', 'Models & Usage'])(
+    'does not interpret chat text %s as a settings heading',
+    async (text) => {
+      const f = await fixture(
+        `<main data-testid="conversation-view"><div data-testid="autoscroll-viewport"><div><div role="article"><p><span>${text}</span></p><h2>${text}</h2></div><div><div><button>Refresh</button><span>Model Context Protocol</span></div></div></div></main></main>`,
+      );
+      expect(f.document.querySelector('#agy-custom-models-section')).toBeNull();
+    },
+  );
+
+  it('mounts in the Settings dialog even when the conversation contains MCP first', async () => {
+    const f = await fixture(
+      '<main data-testid="conversation-view"><div role="article"><span>MCP</span></div></main><div role="dialog" aria-label="Settings"><main class="overflow-y-auto"><div id="model-settings"><h2><span>Models &amp; Usage</span></h2></div></main></div>',
+      [model],
+      'http://127.0.0.1:54321/c/conversation?settingsOpen=true',
+    );
+    expect(f.document.querySelector('#model-settings > #agy-custom-models-section')).toBeTruthy();
+    expect(f.document.querySelector('[data-testid="conversation-view"] #agy-custom-models-section')).toBeNull();
+  });
+
+  it('removes an existing panel moved into the conversation and remounts it in Settings', async () => {
+    const f = await fixture(
+      '<section id="settings"><h2>Models &amp; Usage</h2></section><main data-testid="conversation-view"></main>',
+    );
+    f.document
+      .querySelector('[data-testid="conversation-view"]')!
+      .append(f.document.getElementById('agy-custom-models-section')!);
+    await vi.waitFor(() => expect(f.document.querySelector('#settings > #agy-custom-models-section')).toBeTruthy());
+    expect(f.document.querySelector('[data-testid="conversation-view"] #agy-custom-models-section')).toBeNull();
+    expect(f.document.querySelectorAll('#agy-custom-models-section')).toHaveLength(1);
+  });
+
+  it('removes the panel when its settings heading disappears without replacing the parent', async () => {
+    const f = await fixture();
+    f.document.querySelector('#settings h2')!.textContent = 'Appearance';
+    await vi.waitFor(() => expect(f.document.querySelector('#agy-custom-models-section')).toBeNull());
+  });
+
+  it('requires a settings surface before accepting a generic Models & Usage heading', async () => {
+    const f = await fixture('<main><h2>Models &amp; Usage</h2></main>', [model], 'http://127.0.0.1:54321/c/conversation');
+    expect(f.document.querySelector('#agy-custom-models-section')).toBeNull();
+  });
+
+  it('removes and restores the panel when the Settings dialog is hidden and shown', async () => {
+    const f = await fixture(
+      '<div role="dialog" aria-label="Settings"><section><h2>Models &amp; Usage</h2></section></div>',
+      [model],
+      'http://127.0.0.1:54321/c/conversation',
+    );
+    const dialog = f.document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.querySelector('#agy-custom-models-section')).toBeTruthy();
+    dialog.style.display = 'none';
+    await vi.waitFor(() => expect(f.document.querySelector('#agy-custom-models-section')).toBeNull());
+    dialog.style.display = '';
+    await vi.waitFor(() => expect(dialog.querySelector('#agy-custom-models-section')).toBeTruthy());
+    expect(f.document.querySelectorAll('#agy-custom-models-section')).toHaveLength(1);
   });
 });

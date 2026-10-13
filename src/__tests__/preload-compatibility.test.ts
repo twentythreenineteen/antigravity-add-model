@@ -45,6 +45,7 @@ function createFixture(response: Response, models: unknown[] = [customModel]) {
     }
   }
   const window = {
+    location: { href: 'http://localhost:54321/', pathname: '/', hash: '' },
     nativeStorage: vendorStorage,
     fetch: nativeFetch as typeof fetch,
     addEventListener: (name: string, callback: () => void) => {
@@ -62,8 +63,8 @@ function createFixture(response: Response, models: unknown[] = [customModel]) {
       };
     },
     window,
-    document: { querySelectorAll: () => [], getElementById: () => ({}) },
-    location: { href: 'http://localhost:54321/' },
+    document: { querySelectorAll: () => [], getElementById: () => null },
+    location: window.location,
     setInterval: vi.fn(),
     XMLHttpRequest: TestXHR,
     URL,

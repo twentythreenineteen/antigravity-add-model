@@ -26,7 +26,7 @@ function equalToken(actual: unknown, expected: string): boolean {
 
 const HTML = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Antigravity Model Manager</title><link rel="stylesheet" href="/_addon/style.css">
-<body><main><h1>Antigravity Model Manager</h1><p>Models, providers and diagnostics for your local IDE proxy.</p>
+<body><main data-testid="settings-view"><h1>Antigravity Model Manager</h1><p>Models, providers and diagnostics for your local IDE proxy.</p>
 <p id="connection-status" role="status"></p><section id="settings"><h2>Models &amp; Usage</h2></section></main>
 <script src="/_addon/app.js"></script></body></html>`;
 const STYLE = `:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#111318;color:#e7e9ed}body{margin:0}main{max-width:1100px;margin:3rem auto;padding:0 1.5rem}button,input,select,textarea{font:inherit}button{cursor:pointer}h1{font-size:1.8rem}p{color:#b7bfcc}a{color:#91bcff}`;

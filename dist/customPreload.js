@@ -436,15 +436,32 @@ window.addEventListener('DOMContentLoaded', () => {
         renderAccounts();
         return () => accounts.map((account) => ({ ...account }));
     }
-    function findRefreshButton() {
-        return (Array.from(document.querySelectorAll('button')).find((node) => !node.closest('#agy-custom-models-section') &&
+    const nonSettingsContent = '#agy-custom-models-section,#agy-modal-overlay,button,nav,[role="tablist"],article,[role="article"],pre,code,' +
+        '[data-testid="conversation-view"],[data-testid="autoscroll-viewport"],[role="log"]';
+    function isSettingsContent(node) {
+        if (node.closest(nonSettingsContent))
+            return false;
+        for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+            if (ancestor.hidden || ancestor.getAttribute('aria-hidden') === 'true')
+                return false;
+            const style = window.getComputedStyle(ancestor);
+            if (style.display === 'none' || style.visibility === 'hidden')
+                return false;
+        }
+        return true;
+    }
+    function findRefreshButton(root) {
+        return (Array.from(root.querySelectorAll('button')).find((node) => !node.closest('#agy-custom-models-section') &&
+            isSettingsContent(node.parentElement || node) &&
             (node.textContent?.trim() === 'Refresh' ||
                 /refresh quota/i.test(`${node.getAttribute('aria-label') || ''} ${node.title || ''}`))) || null);
     }
     async function modelsChanged() {
         customModelsCache.ts = 0;
         await renderCustomModelsList();
-        findRefreshButton()?.click();
+        const mount = findSettingsMount();
+        if (mount)
+            findRefreshButton(mount)?.click();
     }
     function uniqueName(base) {
         let name = base, index = 2;
@@ -1080,35 +1097,48 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
     function findSettingsMount() {
-        const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,[role="heading"],div,span'));
+        // Desktop settings are a modal over /c/...; older layouts use a settings route.
+        // A chat span saying "MCP" is not evidence that the settings page is open.
+        const settingsRoot = Array.from(document.querySelectorAll('[role="dialog"][aria-label="Settings"],.settings-modal-container,[data-testid="settings-view"],[data-testid="settings-panel"]')).find(isSettingsContent);
+        const settingsRoute = /^\/settings(?:\/|$)/i.test(window.location.pathname) || /^#\/?settings(?:\/|\?|$)/i.test(window.location.hash);
+        const root = settingsRoot || (settingsRoute ? document.body : null);
+        if (!root)
+            return null;
+        const headings = Array.from(root.querySelectorAll('h1,h2,h3,h4,[role="heading"],div,span'));
         const heading = headings.find((node) => node.children.length === 0 &&
             /^(Models\s*(?:&|and)\s*Usage|Model Settings|MCP Servers|MCP)$/i.test(node.textContent?.trim() || '') &&
-            !node.closest('#agy-custom-models-section,button,nav,[role="tablist"],[hidden],[aria-hidden="true"]'));
+            isSettingsContent(node));
         if (heading) {
             const section = heading.closest('section');
-            if (section)
+            if (section && root.contains(section))
                 return section;
             const panel = heading.closest('[role="tabpanel"]');
-            if (panel)
+            if (panel && root.contains(panel))
                 return panel;
             let content = heading;
-            while (content.parentElement && content.parentElement !== document.body) {
+            while (content.parentElement && content.parentElement !== root) {
                 if (content.parentElement.classList.contains('overflow-y-auto'))
                     return content;
                 content = content.parentElement;
             }
-            return heading.parentElement?.parentElement || heading.parentElement;
+            const fallback = heading.parentElement?.parentElement || heading.parentElement;
+            return fallback && root.contains(fallback) ? fallback : root;
         }
-        const refresh = findRefreshButton();
+        const refresh = findRefreshButton(root);
         const legacy = refresh?.parentElement?.parentElement?.parentElement;
-        if (legacy && /MCP|Model Context Protocol/i.test(legacy.textContent || ''))
+        if (legacy &&
+            root.contains(legacy) &&
+            isSettingsContent(legacy) &&
+            /MCP|Model Context Protocol/i.test(legacy.textContent || ''))
             return legacy;
         return null;
     }
     function injectCustomModelsSection() {
-        if (document.getElementById('agy-custom-models-section'))
-            return;
         const mount = findSettingsMount();
+        const existing = document.getElementById('agy-custom-models-section');
+        if (existing && mount && existing.parentElement === mount)
+            return;
+        existing?.remove();
         if (!mount)
             return;
         installStyles();
@@ -1140,8 +1170,6 @@ window.addEventListener('DOMContentLoaded', () => {
             return;
         let pending;
         const observer = new MutationObserver(() => {
-            if (document.getElementById('agy-custom-models-section'))
-                return;
             if (pending)
                 clearTimeout(pending);
             pending = setTimeout(() => {
@@ -1149,7 +1177,13 @@ window.addEventListener('DOMContentLoaded', () => {
                 injectCustomModelsSection();
             }, 150);
         });
-        observer.observe(document.body, { childList: true, subtree: true });
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+            attributeFilter: ['hidden', 'aria-hidden', 'class', 'style'],
+        });
         window.addEventListener('pagehide', () => {
             observer.disconnect();
             if (pending)

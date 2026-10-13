@@ -46,10 +46,14 @@ beforeEach(() => {
   shared.modelReasoningContent.clear();
   shared.activeStreamContexts.clear();
   shared.translatedToolCalls.clear();
+  shared.subagentIntents.clear();
+  shared.subagentModelOverrides.clear();
   shared.stateTimestamps.toolCallIds.clear();
   shared.stateTimestamps.reasoning.clear();
   shared.stateTimestamps.streamCtx.clear();
   shared.stateTimestamps.translatedCalls.clear();
+  shared.stateTimestamps.subagentIntents.clear();
+  shared.stateTimestamps.subagentOverrides.clear();
 });
 
 // ─── mapGeminiToOpenAI ─────────────────────────────────────────────────────
@@ -337,6 +341,132 @@ describe('mapOpenAIToGemini', () => {
       { functionCall: { name: 'write_to_file', args, id: 'retry-write' } },
     ]);
     expect(result.candidates[0].finishReason).toBe('STOP');
+  });
+
+  it('rewrites a custom invoke_subagent Model to inherit and binds the intent to the spawned conversation', () => {
+    const result = mapOpenAIToGemini(
+      {
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                {
+                  id: 'subagent-spawn',
+                  type: 'function',
+                  function: {
+                    name: 'invoke_subagent',
+                    arguments: JSON.stringify({
+                      Subagents: [
+                        { TypeName: 'self', Role: 'R', Prompt: 'P', Model: 'models/openrouter/openai/gpt-6-luna' },
+                      ],
+                    }),
+                  },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+      },
+      'external-model',
+    );
+    const fc = result.candidates[0].content.parts.find((p) => p.functionCall)!.functionCall!;
+    expect((fc.args as { Subagents: Array<{ Model: string }> }).Subagents[0].Model).toBe('inherit');
+    expect(shared.subagentIntents.get('subagent-spawn')).toEqual(['models/openrouter/openai/gpt-6-luna']);
+
+    const history = {
+      contents: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'invoke_subagent',
+                args: { Subagents: [{ TypeName: 'self', Role: 'R', Prompt: 'P', Model: 'inherit' }] },
+                id: 'subagent-spawn',
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'invoke_subagent',
+                id: 'subagent-spawn',
+                response: {
+                  output:
+                    'Created the following subagents:\n{\n  "conversationId": "b196508f-b481-46a8-b3cf-590887655e3b",\n  "logAbsoluteUri": "file:///x"\n}',
+                },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const translatedRequest = mapGeminiToOpenAI(history, 'external-model');
+    const toolMessage = translatedRequest.messages.find((m) => m.role === 'tool')! as {
+      tool_call_id: string;
+    };
+    expect(toolMessage.tool_call_id).toBe('subagent-spawn');
+    expect(shared.subagentModelOverrides.get('b196508f-b481-46a8-b3cf-590887655e3b')).toBe(
+      'models/openrouter/openai/gpt-6-luna',
+    );
+    // History replays must keep the binding stable and restore the intended Model
+    // in the assistant tool call so the model does not see its own rewritten args.
+    const replay = mapGeminiToOpenAI(history, 'external-model');
+    expect(shared.subagentModelOverrides.get('b196508f-b481-46a8-b3cf-590887655e3b')).toBe(
+      'models/openrouter/openai/gpt-6-luna',
+    );
+    const replayedCall = replay.messages.find((m) => m.role === 'assistant' && m.tool_calls) as {
+      tool_calls: Array<{ function: { arguments: string } }>;
+    };
+    const replayedArgs = JSON.parse(replayedCall.tool_calls[0].function.arguments) as {
+      Subagents: Array<{ Model: string }>;
+    };
+    expect(replayedArgs.Subagents[0].Model).toBe('models/openrouter/openai/gpt-6-luna');
+  });
+
+  it('removes the invoke_subagent Model enum and restrictive description in tool schemas', () => {
+    const parametersJsonSchema = {
+      type: 'object',
+      properties: {
+        Subagents: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              Model: {
+                type: 'string',
+                description:
+                  "Model to use for the subagent. 'inherit' (default) uses the calling agent's model. 'flash_lite' uses a very light model.",
+                enum: ['inherit', 'flash_lite', 'flash', 'pro'],
+              },
+            },
+          },
+        },
+      },
+    };
+    const result = mapGeminiToOpenAI(
+      {
+        contents: [],
+        tools: [{ functionDeclarations: [{ name: 'invoke_subagent', parametersJsonSchema }] }],
+      },
+      'external-model',
+    );
+    const parameters = result.tools![0].function.parameters as {
+      properties: { Subagents: { items: { properties: { Model: Record<string, unknown> } } } };
+    };
+    const model = parameters.properties.Subagents.items.properties.Model;
+    expect(model).not.toHaveProperty('enum');
+    expect(String(model.description)).toMatch(/custom models configured in Antigravity/i);
+    expect(parametersJsonSchema.properties.Subagents.items.properties.Model.enum).toEqual([
+      'inherit',
+      'flash_lite',
+      'flash',
+      'pro',
+    ]);
   });
 
   it('keeps valid write_to_file arguments within the schema sent to the provider', () => {

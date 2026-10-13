@@ -11,6 +11,10 @@ import {
   translateToolCallToNative,
   formatTranslatedResponse,
   normalizeToolArgs,
+  allowAnySubagentModel,
+  rewriteSubagentModelIntent,
+  bindSubagentIntents,
+  restoreSubagentModelArgs,
   ToolCallArgs,
   ToolSchemas,
 } from './utils';
@@ -195,6 +199,7 @@ function mapGeminiToolsToAnthropic(geminiTools: GeminiTool[]): AnthropicTool[] {
       for (const func of toolGroup.functionDeclarations) {
         const declaration = func.parametersJsonSchema ?? func.parameters;
         const params = normalizeToolSchema(declaration ?? { type: 'object', properties: {} });
+        allowAnySubagentModel(func.name, params);
         anthropicTools.push({
           name: func.name,
           description: func.description || '',
@@ -252,6 +257,7 @@ export function mapGeminiToAnthropic(
                 originalName = translatedInfo.originalName;
                 originalArgs = { CommandLine: translatedInfo.cmd, Cwd: translatedInfo.cwd };
               }
+              restoreSubagentModelArgs(originalName, callId, originalArgs as Record<string, unknown>);
               contentBlocks.push({
                 type: 'tool_use',
                 id: callId,
@@ -284,6 +290,7 @@ export function mapGeminiToAnthropic(
               } else {
                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
               }
+              bindSubagentIntents(funcName, toolCallId, responseData);
               pendingToolResults.push({
                 type: 'tool_result',
                 tool_use_id: toolCallId,
@@ -365,6 +372,7 @@ export function mapAnthropicToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, block.id || '');
       }
+      rewriteSubagentModelIntent(translated.name, translated.args, block.id || 'call_invoke_subagent');
 
       functionCalls.push({
         functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: block.id },
@@ -475,6 +483,7 @@ export function mapAnthropicChunkToGemini(
           });
           touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
         }
+        rewriteSubagentModelIntent(translated.name, translated.args, tc.id || 'call_invoke_subagent');
         return { functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } };
       });
       activeStreamContexts.delete(streamId);

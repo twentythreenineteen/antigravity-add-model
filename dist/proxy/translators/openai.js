@@ -74,6 +74,7 @@ function mapGeminiToolsToOpenAI(geminiTools) {
             for (const func of toolGroup.functionDeclarations) {
                 const declaration = func.parametersJsonSchema ?? func.parameters;
                 const params = (0, utils_1.normalizeToolSchema)(declaration ?? { type: 'object', properties: {} });
+                (0, utils_1.allowAnySubagentModel)(func.name, params);
                 openaiTools.push({
                     type: 'function',
                     function: {
@@ -127,6 +128,7 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
                                 originalName = translatedInfo.originalName;
                                 originalArgs = { CommandLine: translatedInfo.cmd, Cwd: translatedInfo.cwd };
                             }
+                            (0, utils_1.restoreSubagentModelArgs)(originalName, callId, originalArgs);
                             toolCalls.push({
                                 id: callId,
                                 type: 'function',
@@ -166,6 +168,7 @@ function mapGeminiToOpenAI(geminiBody, modelName, stateKey = modelName) {
                             else {
                                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
                             }
+                            (0, utils_1.bindSubagentIntents)(funcName, toolCallId, responseData);
                             messages.push({ role: 'tool', content: contentStr, tool_call_id: toolCallId });
                         }
                     }
@@ -305,6 +308,7 @@ function mapOpenAIToGemini(openAiRes, modelName, toolSchemas) {
                 });
                 (0, shared_1.touchStateTimestamp)(shared_1.stateTimestamps.translatedCalls, tc.id);
             }
+            (0, utils_1.rewriteSubagentModelIntent)(translated.name, translated.args, tc.id || 'call_invoke_subagent');
             return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
         });
         if (choice.message.content)
@@ -467,6 +471,7 @@ function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
                     });
                     (0, shared_1.touchStateTimestamp)(shared_1.stateTimestamps.translatedCalls, tc.id);
                 }
+                (0, utils_1.rewriteSubagentModelIntent)(translated.name, translated.args, tc.id || 'call_invoke_subagent');
                 return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
             });
             shared_1.activeStreamContexts.delete(streamId);
@@ -502,6 +507,7 @@ function mapOpenAIChunkToGemini(chunk, modelName, streamKey, toolSchemas) {
                 });
                 (0, shared_1.touchStateTimestamp)(shared_1.stateTimestamps.translatedCalls, tc.id);
             }
+            (0, utils_1.rewriteSubagentModelIntent)(translated.name, translated.args, tc.id || 'call_invoke_subagent');
             return { functionCall: { name: translated.name, args: translated.args, id: tc.id } };
         });
         shared_1.activeStreamContexts.delete(streamId);

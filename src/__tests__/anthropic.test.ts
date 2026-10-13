@@ -52,10 +52,14 @@ beforeEach(() => {
   shared.modelReasoningContent.clear();
   shared.activeStreamContexts.clear();
   shared.translatedToolCalls.clear();
+  shared.subagentIntents.clear();
+  shared.subagentModelOverrides.clear();
   shared.stateTimestamps.toolCallIds.clear();
   shared.stateTimestamps.reasoning.clear();
   shared.stateTimestamps.streamCtx.clear();
   shared.stateTimestamps.translatedCalls.clear();
+  shared.stateTimestamps.subagentIntents.clear();
+  shared.stateTimestamps.subagentOverrides.clear();
 });
 
 // ─── mapGeminiToAnthropic ──────────────────────────────────────────────────

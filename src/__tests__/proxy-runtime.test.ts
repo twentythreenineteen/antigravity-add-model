@@ -6,7 +6,7 @@ import { buildFallbackChain, getProxyMetrics, runCustomModelRequest, stopCustomR
 import { stopCleanupInterval } from '../proxy/shared';
 import { CircuitBreaker } from '../proxy/circuitBreaker';
 import { applyRequestOptions, parseRetryAfter, trimContext } from '../proxy/requestOptions';
-import { getGoogleApiUrl } from '../proxy/translators/google';
+import { getGoogleApiUrl, mapGeminiToGoogle } from '../proxy/translators/google';
 import { getProviderHeaders, getProviderUrl, getTranslator, translateRequest } from '../proxy/registry';
 import { getProvider, PROVIDERS, resolveApiFormat } from '../providers';
 import { validateCustomModel } from '../schemaValidator';
@@ -1328,6 +1328,43 @@ describe('provider and configuration contracts', () => {
     expect(getProviderUrl('http://localhost/v1?key=test', 'model', false, getTranslator('openai'))).toBe(
       'http://localhost/v1/chat/completions?key=test',
     );
+  });
+
+  it('relaxes the invoke_subagent Model restriction on the Google passthrough path', () => {
+    const subagentSchema = () => ({
+      type: 'OBJECT',
+      properties: {
+        Subagents: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              Model: {
+                type: 'STRING',
+                description: "Model to use for the subagent. 'inherit' (default) uses the calling agent's model.",
+                enum: ['inherit', 'flash_lite', 'flash', 'pro'],
+              },
+            },
+          },
+        },
+      },
+    });
+    const original = subagentSchema();
+    const body = {
+      contents: [],
+      tools: [{ functionDeclarations: [{ name: 'invoke_subagent', parametersJsonSchema: subagentSchema() }] }],
+    };
+    const result = mapGeminiToGoogle(body, 'gemini-3-pro') as typeof body;
+    const model = (result.tools[0].functionDeclarations[0].parametersJsonSchema as ReturnType<typeof subagentSchema>)
+      .properties.Subagents.items.properties.Model;
+    expect(model).not.toHaveProperty('enum');
+    expect(String(model.description)).toMatch(/custom models configured in Antigravity/i);
+    expect((original.properties.Subagents.items.properties.Model as Record<string, unknown>).enum).toEqual([
+      'inherit',
+      'flash_lite',
+      'flash',
+      'pro',
+    ]);
   });
 
   it('maps reasoning and thinking controls into the selected protocol and protects conversation fields', () => {

@@ -2,6 +2,12 @@
 
 Release history preserved from the project README. Historical entries describe the behavior of their release; see [compatibility and recovery](docs/compatibility.md) for current installation guidance.
 
+### Unreleased — Subagent model routing
+
+- Allow any configured custom model to run a subagent. The language server only accepts its built-in tiers (`inherit`, `flash_lite`, `flash`, `pro`) for the `invoke_subagent` Model argument, so the proxy relaxes the tool schema sent to custom models (removing the Model enum), rewrites non-tier values to `inherit` in the emitted tool call, and records the intended model.
+- Bind the intended model to the spawned subagent's conversationId from the `invoke_subagent` tool response and reroute that conversation's generation requests (identified by the Cloud Code `labels.cascade_id`) to the intended custom model. Restore the original Model values when replaying history so the model does not see its own rewritten arguments and retry.
+- Cover OpenAI-compatible, Anthropic-compatible and Google AI Studio request paths, including streamed tool calls. Verify end to end that a custom parent model can spawn a subagent running a different custom model.
+
 ### Unreleased — IDE adapter and direct-proxy diagnostics
 
 - Add an Antigravity IDE settings adapter with recognized-layout preflight, comment-preserving edits, hash-checked backups, conflict-safe restore and managed launch. Recognize the official IDE 2.5.5 hidden core endpoint implementation and report its IDE version separately from VS Code 1.107.0. No vendor code or OS startup tasks are changed.

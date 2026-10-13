@@ -5,6 +5,7 @@
 
 import * as path from 'path';
 import log from 'electron-log';
+import { subagentIntents, subagentModelOverrides, stateTimestamps, touchStateTimestamp } from '../shared';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -415,6 +416,145 @@ export function normalizeToolSchema(schema: object): Record<string, unknown> {
   const normalized = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
   normalizeSchemaNode(normalized);
   return normalized;
+}
+
+// ─── Subagent model routing ────────────────────────────────────────────────
+
+const SUBAGENT_MODEL_DESCRIPTION =
+  "Model to use for the subagent. 'inherit' (default) uses the calling agent's model. 'flash_lite' uses a very light model. 'flash' uses a smaller, faster model suited for simple tasks like research lookups, file reading, or quick searches. 'pro' uses a larger, more capable model suited for complex tasks requiring deep reasoning, large refactors, or multi-step planning. Any other exact model name is also accepted, including custom models configured in Antigravity.";
+
+/**
+ * Removes the invoke_subagent Model enum and rewrites its description so models
+ * are free to pass any model name (including custom models), not only the
+ * built-in tiers.
+ */
+export function allowAnySubagentModel(toolName: string, schema: unknown): void {
+  if (toolName !== 'invoke_subagent' || !schema || typeof schema !== 'object') return;
+  const root = schema as Record<string, unknown>;
+  const subagents = root.properties && typeof root.properties === 'object'
+    ? (root.properties as Record<string, unknown>).Subagents
+    : undefined;
+  const items = subagents && typeof subagents === 'object'
+    ? (subagents as Record<string, unknown>).items
+    : undefined;
+  const itemProps =
+    items && typeof items === 'object' && (items as Record<string, unknown>).properties && typeof (items as Record<string, unknown>).properties === 'object'
+      ? ((items as Record<string, unknown>).properties as Record<string, unknown>)
+      : undefined;
+  const model = itemProps ? itemProps.Model : undefined;
+  if (model && typeof model === 'object') {
+    const modelDef = model as Record<string, unknown>;
+    delete modelDef.enum;
+    modelDef.description = SUBAGENT_MODEL_DESCRIPTION;
+  }
+}
+
+/**
+ * Relaxes the invoke_subagent Model restriction across a Gemini-format tools array.
+ */
+export function relaxSubagentTools(tools: unknown): void {
+  if (!Array.isArray(tools)) return;
+  for (const toolGroup of tools) {
+    const declarations =
+      toolGroup && typeof toolGroup === 'object'
+        ? (toolGroup as Record<string, unknown>).functionDeclarations
+        : undefined;
+    if (!Array.isArray(declarations)) continue;
+    for (const func of declarations) {
+      if (!func || typeof func !== 'object') continue;
+      const decl = func as Record<string, unknown>;
+      if (decl.name !== 'invoke_subagent') continue;
+      allowAnySubagentModel('invoke_subagent', decl.parametersJsonSchema ?? decl.parameters);
+    }
+  }
+}
+
+const SUBAGENT_MODEL_TIERS = new Set(['inherit', 'flash_lite', 'flash', 'pro']);
+// Tolerates JSON-escaped quotes (\"conversationId\") as well as raw ones.
+const SUBAGENT_CONVERSATION_ID_PATTERN = /\\?"conversationId\\?"\s*:\s*\\?"([0-9a-fA-F-]{36})\\?"/g;
+
+/**
+ * The language server only accepts the built-in tiers for the invoke_subagent
+ * Model argument. When a model asks for another model (e.g. a custom model),
+ * rewrite the value to 'inherit' so the spawn succeeds, and remember the
+ * intended model per subagent so the proxy can reroute the spawned subagent's
+ * requests. Intended models are bound to subagent conversationIds later, when
+ * the invoke_subagent tool response (which lists them) flows back.
+ */
+export function rewriteSubagentModelIntent(name: string, args: Record<string, unknown> | undefined, toolCallId: string): void {
+  if (name !== 'invoke_subagent' || !args || !Array.isArray(args.Subagents) || !toolCallId) return;
+  const intents: string[] = [];
+  let changed = false;
+  for (const sub of args.Subagents as unknown[]) {
+    if (!sub || typeof sub !== 'object') {
+      intents.push('');
+      continue;
+    }
+    const entry = sub as Record<string, unknown>;
+    const model = typeof entry.Model === 'string' ? entry.Model.trim() : '';
+    if (model && !SUBAGENT_MODEL_TIERS.has(model)) {
+      entry.Model = 'inherit';
+      intents.push(model);
+      changed = true;
+    } else {
+      intents.push('');
+    }
+  }
+  if (changed) {
+    subagentIntents.set(toolCallId, intents);
+    touchStateTimestamp(stateTimestamps.subagentIntents, toolCallId);
+    log.info(`[Proxy] Subagent model intent recorded for tool call ${toolCallId}: ${intents.filter(Boolean).join(', ')}`);
+  }
+}
+
+/**
+ * Binds recorded invoke_subagent model intents to the subagent conversationIds
+ * listed in the tool response, so later requests from those conversations are
+ * rerouted to the intended custom model. Safe to call on every history replay:
+ * binding is idempotent, and intents are retained so the conversation history
+ * sent back to the model can be restored (see restoreSubagentModelArgs).
+ */
+export function bindSubagentIntents(name: string, toolCallId: string, response: unknown): void {
+  if (name !== 'invoke_subagent' || !toolCallId) return;
+  const intents = subagentIntents.get(toolCallId);
+  if (!intents || !intents.some((value) => value)) return;
+  let text = '';
+  if (typeof response === 'string') {
+    text = response;
+  } else if (response && typeof response === 'object') {
+    const output = (response as Record<string, unknown>).output;
+    text = typeof output === 'string' ? output : JSON.stringify(response);
+  }
+  const ids: string[] = [];
+  for (const match of text.matchAll(SUBAGENT_CONVERSATION_ID_PATTERN)) ids.push(match[1]);
+  if (!ids.length) return;
+  let bound = 0;
+  for (let i = 0; i < intents.length && i < ids.length; i++) {
+    if (!intents[i]) continue;
+    subagentModelOverrides.set(ids[i], intents[i]);
+    touchStateTimestamp(stateTimestamps.subagentOverrides, ids[i]);
+    bound++;
+  }
+  if (bound > 0) {
+    log.info(`[Proxy] Bound ${bound} subagent model intent(s) from tool call ${toolCallId}`);
+  }
+}
+
+/**
+ * Restores the original Model values the model asked for in invoke_subagent
+ * tool calls when replaying conversation history back to the model. The proxy
+ * rewrites them to 'inherit' for the language server; without restoring them,
+ * the model sees its own calls as if it had used 'inherit' and retries.
+ */
+export function restoreSubagentModelArgs(name: string, toolCallId: string, args: Record<string, unknown> | undefined): void {
+  if (name !== 'invoke_subagent' || !args || !Array.isArray(args.Subagents)) return;
+  const intents = subagentIntents.get(toolCallId);
+  if (!intents) return;
+  for (let i = 0; i < intents.length && i < args.Subagents.length; i++) {
+    if (!intents[i]) continue;
+    const sub = args.Subagents[i];
+    if (sub && typeof sub === 'object') (sub as Record<string, unknown>).Model = intents[i];
+  }
 }
 
 /**

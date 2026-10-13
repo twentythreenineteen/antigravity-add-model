@@ -11,6 +11,10 @@ import {
   translateToolCallToNative,
   formatTranslatedResponse,
   normalizeToolArgs,
+  allowAnySubagentModel,
+  rewriteSubagentModelIntent,
+  bindSubagentIntents,
+  restoreSubagentModelArgs,
   ToolCallArgs,
   TranslatedCallInfo,
   ToolSchemas,
@@ -231,6 +235,7 @@ function mapGeminiToolsToOpenAI(geminiTools: GeminiTool[]): OpenAITool[] {
       for (const func of toolGroup.functionDeclarations) {
         const declaration = func.parametersJsonSchema ?? func.parameters;
         const params = normalizeToolSchema(declaration ?? { type: 'object', properties: {} });
+        allowAnySubagentModel(func.name, params);
         openaiTools.push({
           type: 'function',
           function: {
@@ -290,6 +295,7 @@ export function mapGeminiToOpenAI(
                 originalName = translatedInfo.originalName;
                 originalArgs = { CommandLine: translatedInfo.cmd, Cwd: translatedInfo.cwd };
               }
+              restoreSubagentModelArgs(originalName, callId, originalArgs as Record<string, unknown>);
               toolCalls.push({
                 id: callId,
                 type: 'function',
@@ -325,6 +331,7 @@ export function mapGeminiToOpenAI(
               } else {
                 contentStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData || {});
               }
+              bindSubagentIntents(funcName, toolCallId, responseData);
               messages.push({ role: 'tool', content: contentStr, tool_call_id: toolCallId });
             }
           }
@@ -470,6 +477,7 @@ export function mapOpenAIToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
+      rewriteSubagentModelIntent(translated.name, translated.args, tc.id || 'call_invoke_subagent');
       return { functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } };
     });
     if (choice.message.content) parts.unshift({ text: choice.message.content });
@@ -632,6 +640,7 @@ export function mapOpenAIChunkToGemini(
           });
           touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
         }
+        rewriteSubagentModelIntent(translated.name, translated.args, tc.id || 'call_invoke_subagent');
         return { functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } };
       });
       activeStreamContexts.delete(streamId);
@@ -667,6 +676,7 @@ export function mapOpenAIChunkToGemini(
         });
         touchStateTimestamp(stateTimestamps.translatedCalls, tc.id);
       }
+      rewriteSubagentModelIntent(translated.name, translated.args, tc.id || 'call_invoke_subagent');
       return { functionCall: { name: translated.name, args: translated.args as Record<string, unknown>, id: tc.id } };
     });
     activeStreamContexts.delete(streamId);

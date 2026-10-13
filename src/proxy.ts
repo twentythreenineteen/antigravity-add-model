@@ -54,6 +54,7 @@ interface GeminiRequestBody {
   model_id?: string;
   sessionId?: string;
   conversationId?: string;
+  labels?: Record<string, unknown>;
   request?: GeminiRequestBody;
   systemInstruction?: { parts: { text?: string }[] };
   contents?: {
@@ -96,6 +97,7 @@ import {
   activeStreamContexts,
   translatedToolCalls,
   stateTimestamps,
+  subagentModelOverrides,
   startCleanupInterval,
   stopCleanupInterval,
 } from './proxy/shared';
@@ -173,6 +175,35 @@ function matchCustomModel(models: CustomModel[], ...selectors: unknown[]): Custo
       )
     );
   });
+}
+
+/**
+ * Reroutes a subagent conversation to the custom model the parent requested via
+ * invoke_subagent. The language server only accepts tier names for the Model
+ * argument, so translators rewrite custom values to 'inherit' and record the
+ * intent; here the intent (keyed by subagent conversationId) is applied.
+ */
+function applySubagentModelOverride(
+  matched: CustomModel | undefined,
+  customModels: CustomModel[],
+  conversationId: unknown,
+): CustomModel | undefined {
+  if (typeof conversationId !== 'string' || !conversationId) return matched;
+  const intended = subagentModelOverrides.get(conversationId);
+  if (!intended) return matched;
+  const resolved =
+    matchCustomModel(customModels, intended) ??
+    customModels.find((model) => (model.displayName || '').toLowerCase() === intended.toLowerCase());
+  if (resolved) {
+    log.info(
+      `[Proxy] Rerouting subagent conversation ${conversationId} to intended model: ${intended} => ${resolved.displayName}`,
+    );
+    return resolved;
+  }
+  log.warn(
+    `[Proxy] Intended subagent model "${intended}" not found; conversation ${conversationId} keeps ${matched?.displayName ?? 'its default model'}`,
+  );
+  return matched;
 }
 
 function customCloudCodeCatalog(upstream: unknown = {}): Record<string, unknown> {
@@ -1164,7 +1195,12 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
         );
         if (modelName !== undefined || modelId !== undefined) {
           const customModels = loadCustomModels();
-          const matchedCustomModel = matchCustomModel(customModels, modelName, modelId);
+          const matchedCustomModel = applySubagentModelOverride(
+            matchCustomModel(customModels, modelName, modelId),
+            customModels,
+            (reqJson.request as { labels?: Record<string, unknown> } | undefined)?.labels?.cascade_id ??
+              reqJson.conversationId,
+          );
           if (matchedCustomModel) {
             log.info(
               `[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`,
@@ -1207,8 +1243,13 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       if (matchedCustomModel) {
         try {
           const geminiBody = JSON.parse(bodyStr) as GeminiRequestBody;
+          const overridden = applySubagentModelOverride(
+            matchedCustomModel,
+            customModels,
+            (geminiBody.labels as { cascade_id?: unknown } | undefined)?.cascade_id ?? geminiBody.conversationId,
+          );
           resolveFileData(geminiBody, req.headers as Record<string, string | string[] | undefined>).then(() => {
-            handleCustomModelRequest(res, matchedCustomModel, geminiBody, isStandardStream, false);
+            handleCustomModelRequest(res, overridden, geminiBody, isStandardStream, false);
           });
           return;
         } catch (e) {

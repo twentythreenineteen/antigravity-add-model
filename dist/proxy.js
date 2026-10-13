@@ -113,6 +113,27 @@ function matchCustomModel(models, ...selectors) {
                 selector === identity.placeholderValue));
     });
 }
+/**
+ * Reroutes a subagent conversation to the custom model the parent requested via
+ * invoke_subagent. The language server only accepts tier names for the Model
+ * argument, so translators rewrite custom values to 'inherit' and record the
+ * intent; here the intent (keyed by subagent conversationId) is applied.
+ */
+function applySubagentModelOverride(matched, customModels, conversationId) {
+    if (typeof conversationId !== 'string' || !conversationId)
+        return matched;
+    const intended = shared_1.subagentModelOverrides.get(conversationId);
+    if (!intended)
+        return matched;
+    const resolved = matchCustomModel(customModels, intended) ??
+        customModels.find((model) => (model.displayName || '').toLowerCase() === intended.toLowerCase());
+    if (resolved) {
+        electron_log_1.default.info(`[Proxy] Rerouting subagent conversation ${conversationId} to intended model: ${intended} => ${resolved.displayName}`);
+        return resolved;
+    }
+    electron_log_1.default.warn(`[Proxy] Intended subagent model "${intended}" not found; conversation ${conversationId} keeps ${matched?.displayName ?? 'its default model'}`);
+    return matched;
+}
 function customCloudCodeCatalog(upstream = {}) {
     const models = loadCustomModels();
     const identities = modelIdentities(models, upstream);
@@ -1003,7 +1024,8 @@ function handleRequest(req, res) {
                 electron_log_1.default.info(`[Proxy] Cloud Code generation request model: ${modelName}, modelId: ${modelId}, url: ${req.url}, bodyKeys: ${Object.keys(reqJson).join(',')}`);
                 if (modelName !== undefined || modelId !== undefined) {
                     const customModels = loadCustomModels();
-                    const matchedCustomModel = matchCustomModel(customModels, modelName, modelId);
+                    const matchedCustomModel = applySubagentModelOverride(matchCustomModel(customModels, modelName, modelId), customModels, reqJson.request?.labels?.cascade_id ??
+                        reqJson.conversationId);
                     if (matchedCustomModel) {
                         electron_log_1.default.info(`[Proxy] Intercepting Cloud Code generation for custom model: ${modelName} => ${matchedCustomModel.displayName}`);
                         const isStream = req.url.includes('streamGenerateContent') || req.url.includes('alt=sse');
@@ -1044,8 +1066,9 @@ function handleRequest(req, res) {
             if (matchedCustomModel) {
                 try {
                     const geminiBody = JSON.parse(bodyStr);
+                    const overridden = applySubagentModelOverride(matchedCustomModel, customModels, geminiBody.labels?.cascade_id ?? geminiBody.conversationId);
                     resolveFileData(geminiBody, req.headers).then(() => {
-                        handleCustomModelRequest(res, matchedCustomModel, geminiBody, isStandardStream, false);
+                        handleCustomModelRequest(res, overridden, geminiBody, isStandardStream, false);
                     });
                     return;
                 }

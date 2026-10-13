@@ -4,7 +4,7 @@
  * Extracted from proxy.js to decouple translators from main orchestration.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.stateTimestamps = exports.translatedToolCalls = exports.activeStreamContexts = exports.modelReasoningContent = exports.modelToolCallIds = void 0;
+exports.stateTimestamps = exports.subagentModelOverrides = exports.subagentIntents = exports.translatedToolCalls = exports.activeStreamContexts = exports.modelReasoningContent = exports.modelToolCallIds = void 0;
 exports.touchStateTimestamp = touchStateTimestamp;
 exports.startCleanupInterval = startCleanupInterval;
 exports.stopCleanupInterval = stopCleanupInterval;
@@ -17,12 +17,22 @@ exports.modelReasoningContent = new Map();
 exports.activeStreamContexts = new Map();
 /** toolCallId → { originalName, translatedName, cmd, cwd } */
 exports.translatedToolCalls = new Map();
+/**
+ * toolCallId → intended subagent model names aligned with the invoke_subagent
+ * Subagents array ('' keeps the tier the model chose). Populated when the proxy
+ * rewrites a custom Model value to 'inherit' so the language server accepts it.
+ */
+exports.subagentIntents = new Map();
+/** subagent conversationId → intended model name for that subagent's requests. */
+exports.subagentModelOverrides = new Map();
 /** State entry timestamps for periodic cleanup */
 exports.stateTimestamps = {
     streamCtx: new Map(),
     toolCallIds: new Map(),
     translatedCalls: new Map(),
     reasoning: new Map(),
+    subagentIntents: new Map(),
+    subagentOverrides: new Map(),
 };
 // ─── Helpers ──────────────────────────────────────────────────────────────
 function touchStateTimestamp(map, key) {
@@ -37,10 +47,23 @@ function startCleanupInterval() {
         const now = Date.now();
         const STREAM_TTL = 600000; // 10 minutes for active stream contexts
         const TOOL_TTL = 1800000; // 30 minutes for tool call IDs & reasoning
+        const SUBAGENT_OVERRIDE_TTL = 21600000; // 6 hours; subagents may run long
         for (const [key, ts] of exports.stateTimestamps.streamCtx) {
             if (now - ts > STREAM_TTL) {
                 exports.activeStreamContexts.delete(key);
                 exports.stateTimestamps.streamCtx.delete(key);
+            }
+        }
+        for (const [key, ts] of exports.stateTimestamps.subagentIntents) {
+            if (now - ts > TOOL_TTL) {
+                exports.subagentIntents.delete(key);
+                exports.stateTimestamps.subagentIntents.delete(key);
+            }
+        }
+        for (const [key, ts] of exports.stateTimestamps.subagentOverrides) {
+            if (now - ts > SUBAGENT_OVERRIDE_TTL) {
+                exports.subagentModelOverrides.delete(key);
+                exports.stateTimestamps.subagentOverrides.delete(key);
             }
         }
         for (const [key, ts] of exports.stateTimestamps.toolCallIds) {

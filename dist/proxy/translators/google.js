@@ -11,7 +11,11 @@ exports.mapGeminiToGoogle = mapGeminiToGoogle;
 exports.mapGoogleToGemini = mapGoogleToGemini;
 exports.mapGoogleChunkToGemini = mapGoogleChunkToGemini;
 exports.getGoogleApiUrl = getGoogleApiUrl;
+// ─── Types ────────────────────────────────────────────────────────────────
+const utils_1 = require("./utils");
+const shared_1 = require("../shared");
 // ─── Request Translation (Passthrough) ────────────────────────────────────
+const SUBAGENT_FALLBACK_KEY = 'google_subagent_bridge';
 /**
  * Google AI Studio uses the same Gemini format — just pass through.
  * The caller handles URL routing (streamGenerateContent vs generateContent).
@@ -25,17 +29,58 @@ function mapGeminiToGoogle(geminiBody, _modelName) {
     delete body.stream;
     delete body.sessionId;
     delete body.conversationId;
+    (0, utils_1.relaxSubagentTools)(body.tools);
+    rewriteSubagentHistory(body.contents);
     return body;
+}
+/** Restores intended Model values in invoke_subagent history and binds spawned conversationIds. */
+function rewriteSubagentHistory(contents) {
+    if (!Array.isArray(contents))
+        return;
+    for (const item of contents) {
+        if (!item.parts)
+            continue;
+        for (const p of item.parts) {
+            if (p.functionCall && p.functionCall.name === 'invoke_subagent') {
+                (0, utils_1.restoreSubagentModelArgs)('invoke_subagent', p.functionCall.id || 'call_invoke_subagent', p.functionCall.args);
+            }
+            if (p.functionResponse && p.functionResponse.name === 'invoke_subagent') {
+                const modelTCIds = shared_1.modelToolCallIds.get(SUBAGENT_FALLBACK_KEY) || {};
+                (0, utils_1.bindSubagentIntents)('invoke_subagent', p.functionResponse.id || modelTCIds['invoke_subagent'] || 'call_invoke_subagent', p.functionResponse.response);
+            }
+        }
+    }
 }
 // ─── Response Translation (Passthrough) ───────────────────────────────────
 /**
  * Google AI Studio returns Gemini-format responses directly.
- * Just pass through — the proxy wraps it in the Cloud Code envelope.
+ * Pass through, rewriting invoke_subagent Model values (custom model names are
+ * not accepted by the language server) and recording the intended models.
  */
 function mapGoogleToGemini(googleRes, _modelName) {
-    // Google AI Studio response is already in Gemini format
-    // Wrapped by caller in { response, traceId, metadata }
+    rewriteSubagentIntentResponses(googleRes);
     return googleRes;
+}
+/** Rewrites invoke_subagent Model args in a Gemini-format response. */
+function rewriteSubagentIntentResponses(googleRes) {
+    const res = googleRes;
+    if (!res || !Array.isArray(res.candidates))
+        return;
+    for (const candidate of res.candidates) {
+        const parts = candidate.content?.parts;
+        if (!Array.isArray(parts))
+            continue;
+        for (const p of parts) {
+            if (!p.functionCall || p.functionCall.name !== 'invoke_subagent')
+                continue;
+            const key = p.functionCall.id || 'call_invoke_subagent';
+            (0, utils_1.rewriteSubagentModelIntent)('invoke_subagent', p.functionCall.args, key);
+            const modelTCIds = shared_1.modelToolCallIds.get(SUBAGENT_FALLBACK_KEY) || {};
+            modelTCIds['invoke_subagent'] = key;
+            shared_1.modelToolCallIds.set(SUBAGENT_FALLBACK_KEY, modelTCIds);
+            (0, shared_1.touchStateTimestamp)(shared_1.stateTimestamps.toolCallIds, SUBAGENT_FALLBACK_KEY);
+        }
+    }
 }
 // ─── Streaming Chunk Translation ──────────────────────────────────────────
 /**
@@ -50,6 +95,7 @@ function mapGoogleChunkToGemini(chunk, _modelName) {
     if (!chunk || typeof chunk !== 'object')
         return null;
     const data = chunk;
+    rewriteSubagentIntentResponses(data);
     // Extract first candidate
     if (!data.candidates || data.candidates.length === 0)
         return null;

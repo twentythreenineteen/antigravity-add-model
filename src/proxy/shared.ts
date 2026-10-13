@@ -16,6 +16,8 @@ export interface StateTimestamps {
   toolCallIds: Map<string, number>;
   translatedCalls: Map<string, number>;
   reasoning: Map<string, number>;
+  subagentIntents: Map<string, number>;
+  subagentOverrides: Map<string, number>;
 }
 
 export interface TranslatedCallInfo {
@@ -39,12 +41,24 @@ export const activeStreamContexts = new Map<string, StreamContext>();
 /** toolCallId → { originalName, translatedName, cmd, cwd } */
 export const translatedToolCalls = new Map<string, TranslatedCallInfo>();
 
+/**
+ * toolCallId → intended subagent model names aligned with the invoke_subagent
+ * Subagents array ('' keeps the tier the model chose). Populated when the proxy
+ * rewrites a custom Model value to 'inherit' so the language server accepts it.
+ */
+export const subagentIntents = new Map<string, string[]>();
+
+/** subagent conversationId → intended model name for that subagent's requests. */
+export const subagentModelOverrides = new Map<string, string>();
+
 /** State entry timestamps for periodic cleanup */
 export const stateTimestamps: StateTimestamps = {
   streamCtx: new Map(),
   toolCallIds: new Map(),
   translatedCalls: new Map(),
   reasoning: new Map(),
+  subagentIntents: new Map(),
+  subagentOverrides: new Map(),
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -63,11 +77,24 @@ export function startCleanupInterval(): void {
     const now = Date.now();
     const STREAM_TTL = 600_000; // 10 minutes for active stream contexts
     const TOOL_TTL = 1_800_000; // 30 minutes for tool call IDs & reasoning
+    const SUBAGENT_OVERRIDE_TTL = 21_600_000; // 6 hours; subagents may run long
 
     for (const [key, ts] of stateTimestamps.streamCtx) {
       if (now - ts > STREAM_TTL) {
         activeStreamContexts.delete(key);
         stateTimestamps.streamCtx.delete(key);
+      }
+    }
+    for (const [key, ts] of stateTimestamps.subagentIntents) {
+      if (now - ts > TOOL_TTL) {
+        subagentIntents.delete(key);
+        stateTimestamps.subagentIntents.delete(key);
+      }
+    }
+    for (const [key, ts] of stateTimestamps.subagentOverrides) {
+      if (now - ts > SUBAGENT_OVERRIDE_TTL) {
+        subagentModelOverrides.delete(key);
+        stateTimestamps.subagentOverrides.delete(key);
       }
     }
     for (const [key, ts] of stateTimestamps.toolCallIds) {

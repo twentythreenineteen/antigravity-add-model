@@ -10,10 +10,12 @@ interface GeminiPart {
     functionCall?: {
         name: string;
         args: Record<string, unknown>;
+        id?: string;
     };
     functionResponse?: {
         name: string;
         response: Record<string, unknown>;
+        id?: string;
     };
     thought?: boolean;
     inlineData?: {
@@ -60,7 +62,8 @@ interface GeminiRequestBody {
 export declare function mapGeminiToGoogle(geminiBody: GeminiRequestBody, _modelName: string): GeminiRequestBody;
 /**
  * Google AI Studio returns Gemini-format responses directly.
- * Just pass through — the proxy wraps it in the Cloud Code envelope.
+ * Pass through, rewriting invoke_subagent Model values (custom model names are
+ * not accepted by the language server) and recording the intended models.
  */
 export declare function mapGoogleToGemini(googleRes: unknown, _modelName: string): unknown;
 /**
